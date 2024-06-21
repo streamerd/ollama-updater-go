@@ -26,6 +26,15 @@ type ApiResponse struct {
 	Models []LocalModel `json:"models"`
 }
 
+var focusedIndex int
+var selectedIndices []int
+var focusedStyle tcell.Style
+
+func init() {
+	// Initialize the focused style with a distinctive background color
+	focusedStyle = tcell.StyleDefault.Background(tcell.ColorYellow).Foreground(tcell.ColorBlack)
+}
+
 func main() {
 	app := tview.NewApplication()
 
@@ -117,15 +126,13 @@ func main() {
 	all.SetBackgroundColor(tcell.Color102)
 	flex.AddItem(all, 1, 1, true)
 
-	// Create a custom checkbox list
 	checkboxes := []*tview.Checkbox{}
-	for _, model := range nonUpToDateModels {
+	for _, model := range localModels {
 		cb := tview.NewCheckbox()
-		cb.SetLabel(model)
+		cb.SetLabel(model.Name)
 		checkboxes = append(checkboxes, cb)
 	}
 
-	// Add checkboxes to the flex container
 	for _, cb := range checkboxes {
 		flex.AddItem(cb, 1, 1, false)
 	}
@@ -133,27 +140,27 @@ func main() {
 	// Attach the change handler to each checkbox
 	for i, cb := range checkboxes {
 		cb.SetChangedFunc(func(checked bool) {
-			handleCheckboxChange(checkboxes, i, checked, cb.GetLabel())
+			handleCheckboxChange(checkboxes, i, checked, cb.GetLabel(), app)
 		})
 	}
 
 	// Define a function to handle input events
 	handleInput := func(event *tcell.EventKey) *tcell.EventKey {
-		switch event.Rune() {
-		case '\r': // Enter triggers update
-			selectedModels := make([]string, 0)
-			for _, cb := range checkboxes {
-				if cb.IsChecked() {
-					selectedModels = append(selectedModels, cb.GetLabel())
-				}
+		switch event.Key() { // Use event.Key() instead of event.Rune()
+		case tcell.KeyEnter: // Use tcell.KeyEnter for the Enter key
+			// Your existing logic for handling Enter key
+		case tcell.KeyUp: // Correctly match tcell.KeyUp
+			if focusedIndex > 0 {
+				focusedIndex--
+				updateFocusVisual(checkboxes, app)
 			}
-			if len(selectedModels) > 0 || checkboxes[0].IsChecked() {
-				// Call updateModel for each selected model or all models if "All" is selected
-				for _, model := range selectedModels {
-					updateModel(model)
-				}
+		case tcell.KeyDown: // Correctly match tcell.KeyDown
+			if focusedIndex < len(checkboxes)-1 {
+				focusedIndex++
+				updateFocusVisual(checkboxes, app)
 			}
 		}
+
 		return event
 	}
 
@@ -167,7 +174,7 @@ func main() {
 
 }
 
-func handleCheckboxChange(checkboxes []*tview.Checkbox, index int, checked bool, itemText string) {
+func handleCheckboxChange(checkboxes []*tview.Checkbox, index int, checked bool, itemText string, app *tview.Application) {
 	if itemText == "All" {
 		for i := 0; i < len(checkboxes); i++ {
 			checkboxes[i].SetChecked(checked)
@@ -190,6 +197,19 @@ func handleCheckboxChange(checkboxes []*tview.Checkbox, index int, checked bool,
 			checkboxes[0].SetDisabled(true)
 		} else {
 			checkboxes[0].SetDisabled(false)
+		}
+	}
+}
+
+func updateFocusVisual(checkboxes []*tview.Checkbox, app *tview.Application) {
+	// Update the visual appearance of the focused checkbox
+	for i, cb := range checkboxes {
+		if i == focusedIndex {
+			// Apply the focusedStyle with a modified background color directly
+			cb.SetBackgroundColor(tcell.Color100) // Apply the modified style directly
+		} else {
+			// Reset the background color to the default or another color as needed
+			cb.SetBackgroundColor(tcell.ColorDefault) // Example: Reset to default color
 		}
 	}
 }
