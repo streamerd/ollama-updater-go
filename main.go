@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"strings"
+
+	"github.com/gdamore/tcell/v2"
+	"github.com/rivo/tview"
 )
 
 type LocalModel struct {
@@ -25,118 +27,170 @@ type ApiResponse struct {
 }
 
 func main() {
-	checkFlag := flag.Bool("check", false, "Check for outdated models")
-	updateFlag := flag.Bool("update", false, "Update outdated models")
+	app := tview.NewApplication()
 
-	flag.Parse()
+	// Fetch local models
+	localEndpoint := "http://localhost:11434/api/tags"
+	localResp, err := http.Get(localEndpoint)
+	if err != nil {
+		log.Fatalf("Failed to fetch local models: %v", err)
+	}
+	defer localResp.Body.Close()
 
-	if *checkFlag || *updateFlag {
-		// Fetch local models
-		localEndpoint := "http://localhost:11434/api/tags"
-		localResp, err := http.Get(localEndpoint)
+	localBody, err := io.ReadAll(localResp.Body)
+	if err != nil {
+		log.Fatalf("Failed to read local models: %v", err)
+	}
+
+	var apiResponse ApiResponse
+	err = json.Unmarshal(localBody, &apiResponse)
+	if err != nil {
+		log.Fatalf("Failed to parse local models: %v", err)
+	}
+
+	localModels := apiResponse.Models
+
+	// Function to calculate hash of a JSON object
+	calculateHash := func(jsonObj interface{}) string {
+		jsonData, _ := json.Marshal(jsonObj)
+		hash := sha256.Sum256(jsonData)
+		return base64.StdEncoding.EncodeToString(hash[:])
+	}
+
+	// Array to hold non-up-to-date models
+	var nonUpToDateModels []string
+
+	// Iterate over local models and compare with remote models
+	for _, localModel := range localModels {
+		localDigest := localModel.Digest
+		repo, tag := strings.Split(localModel.Name, ":")[0], strings.Split(localModel.Name, ":")[1]
+
+		// Conditionally prepend "/library" to the repo name if it doesn't contain "/"
+		if !strings.Contains(repo, "/") {
+			repo = fmt.Sprintf("library/%s", repo)
+		}
+
+		// Construct URL for the remote model with the potentially modified repo name
+		remoteURL := fmt.Sprintf("https://ollama.ai/v2/%s/manifests/%s", repo, tag)
+		// Fetch remote model info
+		remoteResp, err := http.Get(remoteURL)
 		if err != nil {
-			log.Fatalf("Failed to fetch local models: %v", err)
+			log.Printf("Failed to fetch remote model %s: %v\n", localModel.Name, err)
+			continue
 		}
-		defer localResp.Body.Close()
+		defer remoteResp.Body.Close()
 
-		localBody, err := io.ReadAll(localResp.Body)
+		// Check for HTTP status codes indicating success (e.g., 200 OK)
+		if remoteResp.StatusCode != http.StatusOK {
+			log.Printf("Remote model %s not found or inaccessible.\n", localModel.Name)
+			continue // Skip this model and continue with the next one
+		}
+
+		// Read the raw response body
+		remoteBody, err := io.ReadAll(remoteResp.Body)
 		if err != nil {
-			log.Fatalf("Failed to read local models: %v", err)
+			log.Printf("Failed to read remote model %s: %v\n", localModel.Name, err)
+			continue
 		}
 
-		var apiResponse ApiResponse
-		err = json.Unmarshal(localBody, &apiResponse)
+		// Attempt to unmarshal the JSON
+		var remoteModelInfo RemoteModelInfo
+		err = json.Unmarshal(remoteBody, &remoteModelInfo)
 		if err != nil {
-			log.Fatalf("Failed to parse local models: %v", err)
+			log.Printf("Failed to parse remote model %s: %v\n", localModel.Name, err)
+			continue
 		}
 
-		localModels := apiResponse.Models
+		// Calculate hash of the remote model info
+		remoteHash := calculateHash(remoteModelInfo)
 
-		// Function to calculate hash of a JSON object
-		calculateHash := func(jsonObj interface{}) string {
-			jsonData, _ := json.Marshal(jsonObj)
-			hash := sha256.Sum256(jsonData)
-			return base64.StdEncoding.EncodeToString(hash[:])
+		// Compare hashes
+		if remoteHash != localDigest {
+			nonUpToDateModels = append(nonUpToDateModels, localModel.Name)
 		}
+	}
 
-		// Array to hold non-up-to-date models
-		var nonUpToDateModels []string
+	flex := tview.NewFlex().SetDirection(tview.FlexRow)
 
-		// Iterate over local models and compare with remote models
-		for _, localModel := range localModels {
-			localDigest := localModel.Digest
-			repo, tag := strings.Split(localModel.Name, ":")[0], strings.Split(localModel.Name, ":")[1]
+	all := tview.NewCheckbox()
+	all.SetLabel("All")
+	all.SetBackgroundColor(tcell.Color102)
+	flex.AddItem(all, 1, 1, true)
 
-			// Conditionally prepend "/library" to the repo name if it doesn't contain "/"
-			if !strings.Contains(repo, "/") {
-				repo = fmt.Sprintf("library/%s", repo)
+	// Create a custom checkbox list
+	checkboxes := []*tview.Checkbox{}
+	for _, model := range nonUpToDateModels {
+		cb := tview.NewCheckbox()
+		cb.SetLabel(model)
+		checkboxes = append(checkboxes, cb)
+	}
+
+	// Add checkboxes to the flex container
+	for _, cb := range checkboxes {
+		flex.AddItem(cb, 1, 1, false)
+	}
+
+	// Attach the change handler to each checkbox
+	for i, cb := range checkboxes {
+		cb.SetChangedFunc(func(checked bool) {
+			handleCheckboxChange(checkboxes, i, checked, cb.GetLabel())
+		})
+	}
+
+	// Define a function to handle input events
+	handleInput := func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Rune() {
+		case '\r': // Enter triggers update
+			selectedModels := make([]string, 0)
+			for _, cb := range checkboxes {
+				if cb.IsChecked() {
+					selectedModels = append(selectedModels, cb.GetLabel())
+				}
 			}
-
-			// Construct URL for the remote model with the potentially modified repo name
-			remoteURL := fmt.Sprintf("https://ollama.ai/v2/%s/manifests/%s", repo, tag)
-			// Fetch remote model info
-			remoteResp, err := http.Get(remoteURL)
-			if err != nil {
-				log.Printf("Failed to fetch remote model %s: %v\n", localModel.Name, err)
-				continue
-			}
-			defer remoteResp.Body.Close()
-
-			// Check for HTTP status codes indicating success (e.g., 200 OK)
-			if remoteResp.StatusCode != http.StatusOK {
-				log.Printf("Remote model %s not found or inaccessible.\n", localModel.Name)
-				continue // Skip this model and continue with the next one
-			}
-
-			// Log the Content-Type header for debugging
-			// contentType := remoteResp.Header.Get("Content-Type")
-			// log.Printf("Content-Type for %s: %s\n", localModel.Name, contentType)
-
-			// Read and log the raw response body for debugging
-			remoteBody, err := io.ReadAll(remoteResp.Body)
-			if err != nil {
-				log.Printf("Failed to read remote model %s: %v\n", localModel.Name, err)
-				continue
-			}
-			// log.Printf("Raw response body for %s: %s\n", localModel.Name, string(remoteBody))
-
-			// Attempt to unmarshal the JSON
-			var remoteModelInfo RemoteModelInfo
-			err = json.Unmarshal(remoteBody, &remoteModelInfo)
-			if err != nil {
-				log.Printf("Failed to parse remote model %s: %v\n", localModel.Name, err)
-				continue
-			}
-
-			// Calculate hash of the remote model info
-			remoteHash := calculateHash(remoteModelInfo)
-
-			// Compare hashes
-			if remoteHash == localDigest {
-				log.Printf("You have the latest %s\n", localModel.Name)
-			} else {
-				// log.Printf("You have an outdated version of %s\n", localModel.Name)
-				nonUpToDateModels = append(nonUpToDateModels, localModel.Name)
-
-				if *updateFlag {
-					log.Printf("Updating %s\n", localModel.Name)
-					updateModel(localModel.Name)
+			if len(selectedModels) > 0 || checkboxes[0].IsChecked() {
+				// Call updateModel for each selected model or all models if "All" is selected
+				for _, model := range selectedModels {
+					updateModel(model)
 				}
 			}
 		}
+		return event
+	}
 
-		if *checkFlag {
-			if len(nonUpToDateModels) > 0 {
-				log.Println("Non-up-to-date models:")
-				for _, modelName := range nonUpToDateModels {
-					log.Println("-", modelName)
-				}
+	// Attach the input handler to the flex container
+	flex.SetInputCapture(handleInput)
+
+	// Run the application with the flex container as root
+	if err := app.SetRoot(flex, true).Run(); err != nil {
+		panic(err)
+	}
+
+}
+
+func handleCheckboxChange(checkboxes []*tview.Checkbox, index int, checked bool, itemText string) {
+	if itemText == "All" {
+		for i := 0; i < len(checkboxes); i++ {
+			checkboxes[i].SetChecked(checked)
+			if checked {
+				checkboxes[i].SetDisabled(true)
 			} else {
-				log.Println("All models are up to date.")
+				checkboxes[i].SetDisabled(false)
 			}
 		}
 	} else {
-		log.Fatal("Please specify either -check or -update flag.")
+		allChecked := true
+		for _, cb := range checkboxes {
+			if cb.IsChecked() {
+				allChecked = false
+				break
+			}
+		}
+		checkboxes[0].SetChecked(allChecked)
+		if allChecked {
+			checkboxes[0].SetDisabled(true)
+		} else {
+			checkboxes[0].SetDisabled(false)
+		}
 	}
 }
 
